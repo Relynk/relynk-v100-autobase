@@ -6,6 +6,8 @@ proxy_env: {} # yamllint disable rule:braces
 #  http_proxy: http://10.128.64.9:3128
 #  https_proxy: http://10.128.64.9:3128
 
+enable_timescaledb: true
+
 ############################################################
 # Main cluster variables
 ############################################################

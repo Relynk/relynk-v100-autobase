@@ -8,3 +8,4 @@ molecule/**/tmp
 .ansible
 .ansible-lint-env
 secrets/
+venv/
