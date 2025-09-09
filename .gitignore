@@ -7,3 +7,4 @@ __pycache__/
 molecule/**/tmp
 .ansible
 .ansible-lint-env
+secrets/
