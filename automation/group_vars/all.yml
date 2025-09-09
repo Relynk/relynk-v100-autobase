@@ -12,7 +12,7 @@ proxy_env: {} # yamllint disable rule:braces
 
 patroni_cluster_name: "postgres-cluster" # the cluster name (must be unique for each cluster)
 
-patroni_superuser_username: "postgres"
+patroni_superuser_username: "relynk_su"
 patroni_superuser_password: "" # Please specify a password. If not defined, will be generated automatically during deployment.
 patroni_superuser_auth_options:
   - { option: "sslmode", value: "{{ 'require' if tls_cert_generate | bool else 'disable' }}" } # or 'verify-ca', 'verify-full'
@@ -30,7 +30,7 @@ synchronous_mode_strict: false # if 'true' then block all client writes to the m
 synchronous_node_count: 1 # number of synchronous standby databases
 
 # Load Balancing
-with_haproxy_load_balancing: false # or 'true' if you want to install and configure the HAProxy load balancers
+with_haproxy_load_balancing: true # or 'true' if you want to install and configure the HAProxy load balancers
 haproxy_listen_port:
   master: 5000
   replicas: 5001
@@ -81,7 +81,7 @@ haproxy_timeout:
 #  \"request_size\":%U\
 #  }"
 
-cluster_vip: "" # IP address for client access to the databases in the cluster (optional).
+cluster_vip: "10.220.1.4" # IP address for client access to the databases in the cluster (optional).
 vip_interface: "{{ ansible_default_ipv4.interface }}" # interface name (e.g., "ens32").
 # Note: VIP-based solutions such as keepalived or vip-manager may not function correctly in cloud environments.
 
@@ -119,7 +119,7 @@ dcs_exists: false # or 'true' if you do not want Autobase to deploy and manage e
 # renovate: datasource=github-releases depName=etcd-io/etcd extractVersion=^v(?<version>.*)$
 etcd_version: 3.5.21
 etcd_conf_dir: "/etc/etcd"
-etcd_data_dir: "/var/lib/etcd"
+etcd_data_dir: "/mnt/etcd"
 etcd_cluster_name: "etcd-{{ patroni_cluster_name }}" # ETCD_INITIAL_CLUSTER_TOKEN
 etcd_on_dedicated_nodes: "{{ groups['etcd_cluster'] | difference(groups['postgres_cluster']) | length > 0 }}" # 'true' or 'false'
 # TLS
@@ -231,14 +231,9 @@ postgresql_password_encryption_algorithm: "scram-sha-256" # or "md5" if your cli
 postgresql_cluster_name: "{{ 'main' if ansible_os_family == 'Debian' else 'data' }}"
 postgresql_home_dir: "{{ '/var/lib/postgresql' if ansible_os_family == 'Debian' else '/var/lib/pgsql' }}"
 # You can specify custom data dir path. Example: "/pgdata/{{ postgresql_version }}/main"
-postgresql_data_dir: "\
-  {% if cloud_provider | default('') | length > 0 %}\
-  {{ pg_data_mount_path | default('/pgdata') }}/{{ postgresql_version }}/{{ postgresql_cluster_name }}\
-  {% else %}\
-  {{ postgresql_home_dir }}/{{ postgresql_version }}/{{ postgresql_cluster_name }}\
-  {% endif %}"
+postgresql_data_dir: "/mnt/pgdata"
 # You can specify custom WAL dir path. Example: "/pgwal/{{ postgresql_version }}/pg_wal"
-postgresql_wal_dir: "" # if defined, symlink will be created [optional]
+postgresql_wal_dir: "/mnt/pgwal" # if defined, symlink will be created [optional]
 postgresql_conf_dir: "\
   {% if ansible_os_family == 'Debian' %}\
   /etc/postgresql/{{ postgresql_version }}/{{ postgresql_cluster_name }}\
@@ -344,8 +339,7 @@ postgresql_parameters:
   - { option: "autovacuum_naptime", value: "1s" }
   - { option: "archive_mode", value: "on" }
   - { option: "archive_timeout", value: "1800s" } # or 600s
-  - { option: "archive_command", value: "cd ." } # not doing anything yet with WAL-s
-  #  - { option: "archive_command", value: "{{ wal_g_archive_command }}" }  # archive WAL-s using WAL-G
+  - { option: "archiveenable_timescaledbive_command", value: "{{ wal_g_archive_command }}" } # archive WAL-s using WAL-G
   #  - { option: "archive_command", value: "{{ pgbackrest_archive_command }}" }  # archive WAL-s using pgbackrest
   - { option: "max_wal_senders", value: "20" } # the maximum number of standby servers you might possibly have
   - { option: "max_replication_slots", value: "20" } # the maximum number of slots for standby servers
@@ -406,7 +400,7 @@ local_postgresql_parameters:
 # Set this variable to 'true' if you want the cluster to be automatically restarted
 # after changing the 'postgresql_parameters' variable that requires a restart in the 'config_pgcluster.yml' playbook.
 # By default, the cluster will not be automatically restarted.
-pending_restart: false
+pending_restart: true
 
 # specify additional hosts that will be added to the pg_hba.conf
 postgresql_pg_hba:
@@ -437,7 +431,7 @@ postgresql_pgpass:
 # PgBouncer parameters
 ############################################################
 
-pgbouncer_install: true # or 'false' if you do not want to install and configure the pgbouncer service
+pgbouncer_install: false # or 'false' if you do not want to install and configure the pgbouncer service
 pgbouncer_processes: 1 # Number of pgbouncer processes to be used. Multiple processes use the so_reuseport option for better performance.
 pgbouncer_conf_dir: "/etc/pgbouncer"
 pgbouncer_log_dir: "/var/log/pgbouncer"
@@ -561,14 +555,14 @@ patroni_remove_data_directory_on_diverged_timelines: false # or 'true'
 ############################################################
 
 # https://patroni.readthedocs.io/en/latest/replica_bootstrap.html#bootstrap
-patroni_cluster_bootstrap_method: "initdb" # or "wal-g", "pgbackrest", "pg_probackup"
+patroni_cluster_bootstrap_method: "wal-g" # or "wal-g", "pgbackrest", "pg_probackup"
 
 # https://patroni.readthedocs.io/en/latest/replica_bootstrap.html#building-replicas
 patroni_create_replica_methods:
   #  - pgbackrest
-  #  - wal_g
+  - wal_g
   #  - pg_probackup
-  - basebackup
+  # - basebackup
 
 pgbackrest:
   - { option: "command", value: "{{ pgbackrest_patroni_cluster_restore_command }}" }
@@ -586,8 +580,8 @@ pg_probackup:
   - { option: "no_params", value: "true" }
 
 # "restore_command" written to recovery.conf when configuring follower (create replica)
-postgresql_restore_command: ""
-# postgresql_restore_command: "{{ wal_g_path }} wal-fetch %f %p"  # restore WAL-s using WAL-G
+# postgresql_restore_command: ""
+postgresql_restore_command: "{{ wal_g_path }} wal-fetch %f %p" # restore WAL-s using WAL-G
 # postgresql_restore_command: "pgbackrest --stanza={{ pgbackrest_stanza }} archive-get %f %p"  # restore WAL-s using pgbackrest
 
 # postgresql_restore_command: "pg_probackup-{{ pg_probackup_version }} archive-get -B
@@ -613,15 +607,17 @@ pg_probackup_restore_command: "{{ pg_probackup_command_parts | join('') }}"
 pg_probackup_patroni_cluster_bootstrap_command: "{{ pg_probackup_command_parts | join('') }}"
 
 # WAL-G
-wal_g_install: false # or 'true'
+wal_g_install: true # or 'true'
 # renovate: datasource=github-releases depName=wal-g/wal-g extractVersion=^v(?<version>.*)$
 wal_g_version: 3.0.7
 wal_g_installation_method: "binary" # or "src" to build from source code
 wal_g_path: "/usr/local/bin/wal-g --config {{ postgresql_home_dir }}/.walg.json"
 wal_g_json: # config https://github.com/wal-g/wal-g#configuration
-  - { option: "AWS_ACCESS_KEY_ID", value: "{{ AWS_ACCESS_KEY_ID | default('') }}" } # define values or pass via --extra-vars
-  - { option: "AWS_SECRET_ACCESS_KEY", value: "{{ AWS_SECRET_ACCESS_KEY | default('') }}" } # define values or pass via --extra-vars
-  - { option: "WALG_S3_PREFIX", value: "{{ WALG_S3_PREFIX | default('s3://' + patroni_cluster_name) }}" } # define values or pass via --extra-vars
+  # - { option: "AWS_ACCESS_KEY_ID", value: "{{ AWS_ACCESS_KEY_ID | default('') }}" } # define values or pass via --extra-vars
+  # - { option: "AWS_SECRET_ACCESS_KEY", value: "{{ AWS_SECRET_ACCESS_KEY | default('') }}" } # define values or pass via --extra-vars
+  # - { option: "WALG_S3_PREFIX", value: "{{ WALG_S3_PREFIX | default('s3://' + patroni_cluster_name) }}" } # define values or pass via --extra-vars
+  - { option: "WALG_AZ_PREFIX", value: "azure://postgres-cluster/walg" } # define values or pass via --extra-vars
+  - { option: "AZURE_STORAGE_ACCOUNT", value: "prodgeneraldbtimescale" } # define values or pass via --extra-vars
   - { option: "WALG_COMPRESSION_METHOD", value: "{{ WALG_COMPRESSION_METHOD | default('brotli') }}" } # or "lz4", "lzma", "zstd"
   - { option: "WALG_DELTA_MAX_STEPS", value: "{{ WALG_DELTA_MAX_STEPS | default('6') }}" } # determines how many delta backups can be between full backups
   - { option: "WALG_PREFETCH_DIR", value: "{{ wal_g_prefetch_dir_path }}" } # prevent pg_rewind failures by setting non-default prefetch directory
@@ -827,7 +823,7 @@ chrony_allow_networks: []
 #  - "172.16.0.0/24"
 #  - "192.168.0.0/16"
 
-timezone: ""
+timezone: "Europe/Oslo"
 # timezone: "Etc/UTC"
 # timezone: "America/New_York"
 # timezone: "Europe/Moscow"
@@ -1012,12 +1008,12 @@ cron_jobs: []
 #    job: "echo 'example job two command'"
 
 # Configure mount points in /etc/fstab and mount the file system (if 'mount.src' is defined)
-mount:
-  - path: "/pgdata"
-    src: "" # device UUID or path.
-    fstype: ext4 # if 'zfs' is specified a ZFS pool will be created
-    opts: defaults,noatime # not applicable to 'zfs'
-    state: mounted
+# mount:
+# - path: "/pgdata"
+#   src: "" # device UUID or path.
+#   fstype: ext4 # if 'zfs' is specified a ZFS pool will be created
+#   opts: defaults,noatime # not applicable to 'zfs'
+#   state: mounted
 #  - path: "/pgwal"
 #    src: ""
 #    fstype: ext4

@@ -1,0 +1,182 @@
+---
+# Ansible Playbook to create WAL safety file on PostgreSQL cluster VMs
+# This creates a dummy file that can be deleted in emergency to free up space
+# Usage: ansible-playbook -i ../inventory create_wal_safety_file.yml
+
+- name: Create WAL Safety File on PostgreSQL Cluster
+  hosts: postgres_cluster
+  become: true
+  become_method: sudo
+  gather_facts: true
+  
+  vars:
+    wal_mount_point: "/mnt/pgwal"
+    safety_file_name: "ONLY_DELETE_THIS_DUMMY_FILE_IN_A_POSTGRES_EMERGENCY"
+    safety_file_size_mb: 300
+    postgres_user: postgres
+    postgres_group: postgres
+  
+  tasks:
+    - name: Check if WAL mount point exists
+      ansible.builtin.stat:
+        path: "{{ wal_mount_point }}"
+      register: wal_mount_stat
+    
+    - name: Fail if WAL mount point doesn't exist
+      ansible.builtin.fail:
+        msg: "WAL mount point {{ wal_mount_point }} does not exist. Run prepare_storage.yml first."
+      when: not wal_mount_stat.stat.exists
+    
+    - name: Check if WAL mount point is actually mounted
+      ansible.builtin.shell: |
+        mountpoint -q {{ wal_mount_point }} && echo "MOUNTED" || echo "NOT_MOUNTED"
+      register: mount_check
+      changed_when: false
+      check_mode: false
+    
+    - name: Fail if WAL mount point is not mounted
+      ansible.builtin.fail:
+        msg: "{{ wal_mount_point }} exists but is not mounted. Run prepare_storage.yml first."
+      when: mount_check.stdout != "MOUNTED"
+    
+    - name: Check current disk usage on WAL mount
+      ansible.builtin.shell: |
+        df -h {{ wal_mount_point }} | tail -1 | awk '{print "Used: "$3" of "$2" ("$5")"}'
+      register: disk_usage
+      changed_when: false
+      check_mode: false
+    
+    - name: Display current WAL disk usage
+      ansible.builtin.debug:
+        msg: "Current WAL disk usage - {{ disk_usage.stdout }}"
+    
+    - name: Check if safety file already exists
+      ansible.builtin.stat:
+        path: "{{ wal_mount_point }}/{{ safety_file_name }}"
+      register: safety_file_stat
+    
+    - name: Display existing safety file info
+      ansible.builtin.debug:
+        msg: "Safety file already exists ({{ (safety_file_stat.stat.size / 1048576) | round(0) }}MB)"
+      when: safety_file_stat.stat.exists
+    
+    - name: Create WAL safety file
+      block:
+        - name: Create {{ safety_file_size_mb }}MB safety file in WAL directory
+          ansible.builtin.shell: |
+            # Create the safety file using dd
+            dd if=/dev/zero of="{{ wal_mount_point }}/{{ safety_file_name }}" bs=1M count={{ safety_file_size_mb }} 2>/dev/null
+            
+            # Verify the file was created
+            if [ -f "{{ wal_mount_point }}/{{ safety_file_name }}" ]; then
+              ls -lh "{{ wal_mount_point }}/{{ safety_file_name }}" | awk '{print "Created safety file: "$9" size: "$5}'
+            else
+              echo "ERROR: Failed to create safety file"
+              exit 1
+            fi
+          register: create_result
+          when: not safety_file_stat.stat.exists
+          changed_when: true
+        
+        - name: Set ownership on safety file
+          ansible.builtin.file:
+            path: "{{ wal_mount_point }}/{{ safety_file_name }}"
+            owner: "{{ postgres_user }}"
+            group: "{{ postgres_group }}"
+            mode: '0644'
+          when: not safety_file_stat.stat.exists
+        
+        - name: Create README for safety file
+          ansible.builtin.copy:
+            content: |
+              # PostgreSQL WAL Safety File
+              
+              This directory contains a safety file that can be deleted in case of WAL directory full emergency.
+              
+              ## Purpose
+              The file "{{ safety_file_name }}" is a {{ safety_file_size_mb }}MB dummy file
+              created to provide emergency space recovery in case PostgreSQL's WAL directory fills up.
+              
+              ## Emergency Procedure
+              If PostgreSQL stops due to WAL directory being full:
+              
+              1. Delete the safety file:
+                 sudo rm {{ wal_mount_point }}/{{ safety_file_name }}
+              
+              2. This will free up {{ safety_file_size_mb }}MB of space immediately
+              
+              3. PostgreSQL should resume normal operation
+              
+              4. Investigate the root cause:
+                 - Check if WAL archiving is working
+                 - Verify replication slots aren't retaining too many WAL files
+                 - Ensure checkpoint_segments/max_wal_size is properly configured
+              
+              5. After resolving the issue, recreate the safety file:
+                 sudo dd if=/dev/zero of={{ wal_mount_point }}/{{ safety_file_name }} bs=1M count={{ safety_file_size_mb }}
+                 sudo chown {{ postgres_user }}:{{ postgres_group }} {{ wal_mount_point }}/{{ safety_file_name }}
+              
+              ## File Details
+              - Size: {{ safety_file_size_mb }}MB
+              - Owner: {{ postgres_user }}:{{ postgres_group }}
+              - Created: {{ ansible_date_time.iso8601 }}
+              - Host: {{ inventory_hostname }}
+            dest: "{{ wal_mount_point }}/README_SAFETY_FILE.txt"
+            owner: "{{ postgres_user }}"
+            group: "{{ postgres_group }}"
+            mode: '0644'
+      rescue:
+        - name: Safety file creation failed
+          ansible.builtin.debug:
+            msg: 
+              - "ERROR: Failed to create safety file"
+              - "Error: {{ ansible_failed_result.msg | default('Unknown error') }}"
+          failed_when: true
+    
+    - name: Verify safety file exists and has correct size
+      ansible.builtin.shell: |
+        if [ -f "{{ wal_mount_point }}/{{ safety_file_name }}" ]; then
+          SIZE=$(stat -c%s "{{ wal_mount_point }}/{{ safety_file_name }}")
+          EXPECTED_SIZE=$(({{ safety_file_size_mb }} * 1048576))
+          if [ $SIZE -eq $EXPECTED_SIZE ]; then
+            echo "✓ Safety file verified: {{ safety_file_size_mb }}MB"
+          else
+            echo "⚠ Safety file size mismatch: $(($SIZE / 1048576))MB instead of {{ safety_file_size_mb }}MB"
+          fi
+        else
+          echo "✗ Safety file not found"
+          exit 1
+        fi
+      register: verify_result
+      changed_when: false
+      check_mode: false
+    
+    - name: Display verification result
+      ansible.builtin.debug:
+        msg: "{{ verify_result.stdout }}"
+    
+    - name: Show final WAL directory contents
+      ansible.builtin.shell: |
+        echo "=== WAL Directory Contents ==="
+        ls -lah {{ wal_mount_point }}/ | head -10
+        echo ""
+        echo "=== Disk Usage After Safety File ==="
+        df -h {{ wal_mount_point }}
+      register: final_status
+      changed_when: false
+      check_mode: false
+    
+    - name: Display final status
+      ansible.builtin.debug:
+        msg: "{{ final_status.stdout_lines }}"
+    
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "✓ WAL safety file configuration completed on {{ inventory_hostname }}"
+          - "  Location: {{ wal_mount_point }}/{{ safety_file_name }}"
+          - "  Size: {{ safety_file_size_mb }}MB"
+          - "  Owner: {{ postgres_user }}:{{ postgres_group }}"
+          - ""
+          - "In case of WAL directory full emergency:"
+          - "  sudo rm {{ wal_mount_point }}/{{ safety_file_name }}"
