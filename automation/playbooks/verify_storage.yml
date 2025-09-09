@@ -1,0 +1,172 @@
+---
+# Ansible Playbook to verify storage configuration on PostgreSQL cluster VMs
+# Usage: ansible-playbook -i ../inventory verify_storage.yml
+
+- name: Verify PostgreSQL Cluster VM Storage Configuration
+  hosts: postgres_cluster
+  become: true
+  become_method: sudo
+  gather_facts: true
+  any_errors_fatal: false
+  
+  vars:
+    expected_mounts:
+      - mount_point: "/mnt/pgdata"
+        min_size_gb: 200
+        owner: postgres
+        group: postgres
+      - mount_point: "/mnt/pgwal"
+        min_size_gb: 50
+        owner: postgres
+        group: postgres
+      - mount_point: "/mnt/etcd"
+        min_size_gb: 25
+        owner: postgres
+        group: postgres
+  
+  tasks:
+    - name: Check system information
+      ansible.builtin.debug:
+        msg:
+          - "Hostname: {{ ansible_hostname }}"
+          - "FQDN: {{ ansible_fqdn }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel: {{ ansible_kernel }}"
+          - "Architecture: {{ ansible_architecture }}"
+      tags: sysinfo
+
+    - name: List all block devices
+      ansible.builtin.shell: |
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,UUID
+      register: block_devices
+      changed_when: false
+      check_mode: false
+      tags: devices
+
+    - name: Display block devices
+      ansible.builtin.debug:
+        msg: "{{ block_devices.stdout_lines }}"
+      tags: devices
+
+    - name: Check NVMe devices
+      ansible.builtin.shell: |
+        ls -la /dev/nvme* | grep -E "nvme[0-9]n[0-9]$" || echo "No NVMe devices found"
+      register: nvme_devices
+      changed_when: false
+      check_mode: false
+      tags: nvme
+
+    - name: Display NVMe devices
+      ansible.builtin.debug:
+        msg: "{{ nvme_devices.stdout_lines }}"
+      tags: nvme
+
+    - name: Check mount points
+      ansible.builtin.shell: |
+        df -h | grep -E "(Filesystem|/mnt/)" || echo "No /mnt/ mount points found"
+      register: mount_points
+      changed_when: false
+      check_mode: false
+      tags: mounts
+
+    - name: Display current mount points
+      ansible.builtin.debug:
+        msg: "{{ mount_points.stdout_lines }}"
+      tags: mounts
+
+    - name: Verify expected mount points
+      block:
+        - name: Check if mount point exists
+          ansible.builtin.stat:
+            path: "{{ item.mount_point }}"
+          register: mount_stat
+          loop: "{{ expected_mounts }}"
+          loop_control:
+            label: "{{ item.mount_point }}"
+
+        - name: Check mount point details
+          ansible.builtin.shell: |
+            if mountpoint -q {{ item.item.mount_point }}; then
+              echo "MOUNTED: YES"
+              df -BG {{ item.item.mount_point }} | tail -1 | awk '{print "SIZE: "$2" USED: "$3" AVAIL: "$4" USE%: "$5}'
+              stat -c "OWNER: %U:%G PERMS: %a" {{ item.item.mount_point }}
+            else
+              echo "MOUNTED: NO"
+              if [ -d {{ item.item.mount_point }} ]; then
+                echo "Directory exists but not mounted"
+                stat -c "OWNER: %U:%G PERMS: %a" {{ item.item.mount_point }}
+              else
+                echo "Directory does not exist"
+              fi
+            fi
+          register: mount_details
+          loop: "{{ mount_stat.results }}"
+          loop_control:
+            label: "{{ item.item.mount_point }}"
+          changed_when: false
+          check_mode: false
+
+        - name: Display mount point verification results
+          ansible.builtin.debug:
+            msg:
+              - "Mount point: {{ item.item.item.mount_point }}"
+              - "{{ item.stdout_lines }}"
+          loop: "{{ mount_details.results }}"
+          loop_control:
+            label: "{{ item.item.item.mount_point }}"
+      tags: verify
+
+    - name: Check /etc/fstab entries
+      ansible.builtin.shell: |
+        grep -E "/mnt/(pgdata|pgwal|etcd)" /etc/fstab || echo "No relevant entries in /etc/fstab"
+      register: fstab_entries
+      changed_when: false
+      check_mode: false
+      tags: fstab
+
+    - name: Display /etc/fstab entries
+      ansible.builtin.debug:
+        msg: "{{ fstab_entries.stdout_lines }}"
+      tags: fstab
+
+    - name: Check disk usage summary
+      ansible.builtin.shell: |
+        echo "=== Disk Usage Summary ==="
+        df -h | grep -E "(Filesystem|/mnt/)" || echo "No /mnt/ filesystems"
+        echo ""
+        echo "=== Disk I/O Statistics ==="
+        iostat -x 1 2 | grep -E "(Device|nvme)" | tail -n +2 || echo "iostat not available"
+      register: disk_summary
+      changed_when: false
+      check_mode: false
+      ignore_errors: true
+      tags: summary
+
+    - name: Display disk usage summary
+      ansible.builtin.debug:
+        msg: "{{ disk_summary.stdout_lines }}"
+      tags: summary
+
+    - name: Generate storage report
+      ansible.builtin.set_fact:
+        storage_report:
+          hostname: "{{ ansible_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          nvme_devices: "{{ nvme_devices.stdout_lines | length }}"
+          mount_points_checked: "{{ expected_mounts | length }}"
+          fstab_entries: "{{ fstab_entries.stdout_lines | select('match', '^UUID=') | list | length }}"
+      tags: report
+
+    - name: Display final storage report
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Storage Verification Report"
+          - "=========================================="
+          - "Host: {{ storage_report.hostname }}"
+          - "Time: {{ storage_report.timestamp }}"
+          - "NVMe devices found: {{ storage_report.nvme_devices }}"
+          - "Mount points checked: {{ storage_report.mount_points_checked }}"
+          - "Persistent fstab entries: {{ storage_report.fstab_entries }}"
+          - "=========================================="
+      tags: report

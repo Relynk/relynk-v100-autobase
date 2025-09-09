@@ -1,0 +1,188 @@
+---
+# Simplified storage preparation playbook using device paths instead of UUIDs
+# Usage: ansible-playbook -i ../inventory prepare_storage_simple.yml
+
+- name: Prepare PostgreSQL Cluster VM Storage (Simple Version)
+  hosts: postgres_cluster
+  become: true
+  become_method: sudo
+  gather_facts: true
+  any_errors_fatal: true
+  
+  vars:
+    disk_configurations:
+      - device: nvme0n2
+        expected_size: "256G"
+        mount_point: "/mnt/pgdata"
+        filesystem: ext4
+        owner: postgres
+        group: postgres
+      - device: nvme0n3
+        expected_size: "64G"
+        mount_point: "/mnt/pgwal"
+        filesystem: ext4
+        owner: postgres
+        group: postgres
+      - device: nvme0n4
+        expected_size: "32G"
+        mount_point: "/mnt/etcd"
+        filesystem: ext4
+        owner: postgres
+        group: postgres
+  
+  tasks:
+    - name: Create postgres user and group if needed
+      block:
+        - name: Create postgres group
+          ansible.builtin.group:
+            name: postgres
+            system: true
+            state: present
+
+        - name: Create postgres user
+          ansible.builtin.user:
+            name: postgres
+            system: true
+            shell: /bin/bash
+            home: /var/lib/postgresql
+            group: postgres
+            createhome: true
+            state: present
+
+    - name: Setup each disk
+      block:
+        - name: "Process disk {{ item.device }}"
+          ansible.builtin.debug:
+            msg: "Setting up /dev/{{ item.device }} -> {{ item.mount_point }}"
+
+        - name: "Check if /dev/{{ item.device }} exists"
+          ansible.builtin.stat:
+            path: "/dev/{{ item.device }}"
+          register: device_check
+
+        - name: "Fail if device does not exist"
+          ansible.builtin.fail:
+            msg: "Device /dev/{{ item.device }} not found"
+          when: not device_check.stat.exists
+
+        - name: "Wipe and partition disk {{ item.device }}"
+          ansible.builtin.shell: |
+            # Check if already mounted
+            if mount | grep -q "^/dev/{{ item.device }}"; then
+              echo "Device already mounted, skipping"
+              exit 1
+            fi
+            
+            # Wipe any existing signatures
+            wipefs -a /dev/{{ item.device }} || true
+            
+            # Create GPT partition table
+            parted -s /dev/{{ item.device }} mklabel gpt
+            
+            # Create partition
+            parted -s /dev/{{ item.device }} mkpart primary ext4 1MiB 100%
+            
+            # Update kernel partition table
+            partprobe /dev/{{ item.device }}
+            sleep 2
+          register: partition_result
+          changed_when: partition_result.rc == 0
+          failed_when: false
+
+        - name: "Determine partition name for {{ item.device }}"
+          ansible.builtin.set_fact:
+            partition_device: "{% if 'nvme' in item.device %}/dev/{{ item.device }}p1{% else %}/dev/{{ item.device }}1{% endif %}"
+
+        - name: "Create filesystem on {{ partition_device }}"
+          ansible.builtin.shell: |
+            # Check if filesystem already exists
+            if blkid {{ partition_device }} 2>/dev/null | grep -q TYPE; then
+              echo "Filesystem already exists"
+            else
+              mkfs.{{ item.filesystem }} -L {{ item.mount_point | basename }} {{ partition_device }}
+            fi
+          register: mkfs_result
+          changed_when: "'Filesystem already exists' not in mkfs_result.stdout"
+
+        - name: "Create mount point {{ item.mount_point }}"
+          ansible.builtin.file:
+            path: "{{ item.mount_point }}"
+            state: directory
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: '0750'
+
+        - name: "Get UUID for {{ partition_device }}"
+          ansible.builtin.shell: |
+            blkid -s UUID -o value {{ partition_device }}
+          register: uuid_result
+          changed_when: false
+
+        - name: "Add to /etc/fstab and mount {{ item.mount_point }}"
+          block:
+            - name: "Remove any existing fstab entry for {{ item.mount_point }}"
+              ansible.builtin.lineinfile:
+                path: /etc/fstab
+                regexp: "\\s+{{ item.mount_point }}\\s+"
+                state: absent
+
+            - name: "Add new fstab entry using UUID"
+              ansible.builtin.lineinfile:
+                path: /etc/fstab
+                line: "UUID={{ uuid_result.stdout }}  {{ item.mount_point }}  {{ item.filesystem }}  defaults,noatime,nodiratime  0  2"
+                state: present
+              when: uuid_result.stdout | length > 0
+
+            - name: "Add new fstab entry using device path (fallback)"
+              ansible.builtin.lineinfile:
+                path: /etc/fstab
+                line: "{{ partition_device }}  {{ item.mount_point }}  {{ item.filesystem }}  defaults,noatime,nodiratime  0  2"
+                state: present
+              when: uuid_result.stdout | length == 0
+
+            - name: "Mount {{ item.mount_point }}"
+              ansible.builtin.shell: |
+                mount {{ item.mount_point }} 2>&1
+              register: mount_result
+              changed_when: true
+              failed_when: 
+                - mount_result.rc != 0
+                - "'already mounted' not in mount_result.stderr"
+
+        - name: "Set ownership on {{ item.mount_point }}"
+          ansible.builtin.file:
+            path: "{{ item.mount_point }}"
+            state: directory
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: '0750'
+            recurse: yes
+
+        - name: "Verify mount is active"
+          ansible.builtin.shell: |
+            findmnt {{ item.mount_point }}
+          register: mount_check
+          changed_when: false
+
+        - name: "Display mount status"
+          ansible.builtin.debug:
+            msg: "✓ {{ item.mount_point }} mounted successfully"
+          when: mount_check.rc == 0
+
+      loop: "{{ disk_configurations }}"
+      loop_control:
+        label: "{{ item.device }} -> {{ item.mount_point }}"
+
+    - name: Final verification
+      ansible.builtin.shell: |
+        echo "=== Disk Mounts ==="
+        df -h | grep /mnt/
+        echo ""
+        echo "=== fstab entries ==="
+        grep /mnt/ /etc/fstab
+      register: final_status
+      changed_when: false
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg: "{{ final_status.stdout_lines }}"

@@ -1,0 +1,158 @@
+---
+# Ansible Playbook to prepare VM storage for PostgreSQL cluster
+# This playbook sets up NVMe disks with proper partitioning, filesystems, and mount points
+# Usage: ansible-playbook -i ../inventory prepare_storage.yml
+
+- name: Prepare PostgreSQL Cluster VM Storage
+  hosts: postgres_cluster
+  become: true
+  become_method: sudo
+  gather_facts: true
+  any_errors_fatal: true
+  
+  vars:
+    # Disk configuration for PostgreSQL cluster nodes
+    disk_configurations:
+      - device: nvme0n2
+        expected_size: "256G"
+        mount_point: "/mnt/pgdata"
+        filesystem: ext4
+        owner: postgres
+        group: postgres
+        description: "PostgreSQL data directory"
+      - device: nvme0n3
+        expected_size: "64G"
+        mount_point: "/mnt/pgwal"
+        filesystem: ext4
+        owner: postgres
+        group: postgres
+        description: "PostgreSQL WAL directory"
+      - device: nvme0n4
+        expected_size: "32G"
+        mount_point: "/mnt/etcd"
+        filesystem: ext4
+        owner: postgres
+        group: postgres
+        description: "etcd data directory"
+    
+    # Validation settings
+    size_tolerance_percent: 5  # Allow 5% size tolerance
+    
+  pre_tasks:
+    - name: Display target hosts
+      ansible.builtin.debug:
+        msg: "Preparing storage on {{ inventory_hostname }} ({{ ansible_hostname }})"
+      tags: always
+
+    - name: Check if running with proper privileges
+      ansible.builtin.command: id -u
+      register: userid
+      changed_when: false
+      check_mode: false
+      tags: always
+
+    - name: Verify running as root or with sudo
+      ansible.builtin.assert:
+        that:
+          - userid.stdout == "0"
+        fail_msg: "This playbook must be run as root or with sudo privileges"
+        success_msg: "Running with proper privileges"
+      tags: always
+
+    - name: Install required packages
+      ansible.builtin.package:
+        name:
+          - parted
+          - e2fsprogs
+          - util-linux
+          - lvm2
+        state: present
+      tags: packages
+
+  tasks:
+    - name: Gather disk information
+      ansible.builtin.shell: |
+        lsblk -J -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,UUID
+      register: lsblk_output
+      changed_when: false
+      check_mode: false
+      tags: gather_info
+
+    - name: Display current disk layout
+      ansible.builtin.debug:
+        msg: "{{ lsblk_output.stdout | from_json }}"
+      tags: gather_info
+
+    - name: Check if postgres user exists
+      ansible.builtin.getent:
+        database: passwd
+        key: postgres
+      register: postgres_user_check
+      ignore_errors: true
+      check_mode: false
+      tags: user_setup
+
+    - name: Create postgres group if it doesn't exist
+      ansible.builtin.group:
+        name: postgres
+        system: true
+        state: present
+      when: postgres_user_check.failed | default(false)
+      tags: user_setup
+
+    - name: Create postgres user if it doesn't exist
+      ansible.builtin.user:
+        name: postgres
+        system: true
+        shell: /bin/bash
+        home: /var/lib/postgresql
+        group: postgres
+        createhome: true
+        state: present
+      when: postgres_user_check.failed | default(false)
+      tags: user_setup
+
+    - name: Process each disk configuration
+      include_tasks: storage_setup_tasks.yml
+      loop: "{{ disk_configurations }}"
+      loop_control:
+        loop_var: disk_config
+        label: "{{ disk_config.device }} -> {{ disk_config.mount_point }}"
+      tags: disk_setup
+
+  post_tasks:
+    - name: Display final mount status
+      ansible.builtin.shell: |
+        df -h | grep -E "(Filesystem|/mnt/)"
+      register: mount_status
+      changed_when: false
+      check_mode: false
+      tags: verify
+
+    - name: Show mount points
+      ansible.builtin.debug:
+        msg: "{{ mount_status.stdout_lines }}"
+      tags: verify
+
+    - name: Verify all mount points are accessible
+      ansible.builtin.file:
+        path: "{{ item.mount_point }}"
+        state: directory
+      loop: "{{ disk_configurations }}"
+      loop_control:
+        label: "{{ item.mount_point }}"
+      check_mode: true
+      tags: verify
+
+    - name: Create summary report
+      ansible.builtin.debug:
+        msg:
+          - "Storage preparation completed successfully on {{ inventory_hostname }}"
+          - "Configured disks:"
+          - "{% for disk in disk_configurations %}  - {{ disk.device }} ({{ disk.expected_size }}) -> {{ disk.mount_point }} [{{ disk.description }}]{% endfor %}"
+      tags: summary
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes

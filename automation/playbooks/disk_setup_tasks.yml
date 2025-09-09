@@ -1,0 +1,140 @@
+---
+# Tasks to setup individual disk - included by prepare_vm_storage.yml
+# Variables expected: disk_config (with device, expected_size, mount_point, filesystem, owner, group)
+
+- name: "Check if /dev/{{ disk_config.device }} exists"
+  ansible.builtin.stat:
+    path: "/dev/{{ disk_config.device }}"
+  register: device_stat
+
+- name: "Fail if device /dev/{{ disk_config.device }} does not exist"
+  ansible.builtin.fail:
+    msg: "Device /dev/{{ disk_config.device }} does not exist on {{ inventory_hostname }}"
+  when: not device_stat.stat.exists
+
+- name: "Get disk size for {{ disk_config.device }}"
+  ansible.builtin.shell: |
+    lsblk -b -n -o SIZE /dev/{{ disk_config.device }} | head -1
+  register: disk_size_bytes
+  changed_when: false
+  check_mode: false
+
+- name: "Convert disk size to human readable for {{ disk_config.device }}"
+  ansible.builtin.shell: |
+    numfmt --to=iec-i --suffix=B {{ disk_size_bytes.stdout }}
+  register: disk_size_human
+  changed_when: false
+  check_mode: false
+
+- name: "Display disk size for {{ disk_config.device }}"
+  ansible.builtin.debug:
+    msg: "Disk /dev/{{ disk_config.device }} size: {{ disk_size_human.stdout.replace('iB', '') }}, expected: {{ disk_config.expected_size }}"
+
+- name: "Verify disk size matches expected for {{ disk_config.device }}"
+  ansible.builtin.assert:
+    that:
+      - disk_size_human.stdout.replace('iB', '') == disk_config.expected_size
+    fail_msg: "Disk size mismatch for /dev/{{ disk_config.device }}: found {{ disk_size_human.stdout.replace('iB', '') }}, expected {{ disk_config.expected_size }}"
+    success_msg: "Disk size verified for /dev/{{ disk_config.device }}: {{ disk_config.expected_size }}"
+
+- name: "Check if {{ disk_config.device }} is already mounted"
+  ansible.builtin.shell: |
+    mount | grep -q "^/dev/{{ disk_config.device }}"
+  register: is_mounted
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Check if {{ disk_config.device }} has existing partitions"
+  ansible.builtin.shell: |
+    lsblk -n /dev/{{ disk_config.device }} | wc -l
+  register: partition_count
+  changed_when: false
+  check_mode: false
+
+- name: "Fail if {{ disk_config.device }} is already mounted"
+  ansible.builtin.fail:
+    msg: "Device /dev/{{ disk_config.device }} is already mounted. Please unmount it first."
+  when: is_mounted.rc == 0
+
+- name: "Check for existing filesystem on {{ disk_config.device }}"
+  ansible.builtin.shell: |
+    blkid /dev/{{ disk_config.device }}1 2>/dev/null || true
+  register: existing_fs
+  changed_when: false
+  check_mode: false
+
+- name: "Create partition table on {{ disk_config.device }}"
+  ansible.builtin.parted:
+    device: "/dev/{{ disk_config.device }}"
+    label: gpt
+    state: present
+  when: partition_count.stdout | int <= 1
+
+- name: "Create partition on {{ disk_config.device }}"
+  ansible.builtin.parted:
+    device: "/dev/{{ disk_config.device }}"
+    number: 1
+    state: present
+    part_start: "0%"
+    part_end: "100%"
+    fs_type: "{{ disk_config.filesystem }}"
+
+- name: "Wait for partition device to be available"
+  ansible.builtin.wait_for:
+    path: "/dev/{{ disk_config.device }}1"
+    state: present
+    timeout: 10
+
+- name: "Create {{ disk_config.filesystem }} filesystem on {{ disk_config.device }}1"
+  ansible.builtin.filesystem:
+    fstype: "{{ disk_config.filesystem }}"
+    dev: "/dev/{{ disk_config.device }}1"
+    force: no
+  when: existing_fs.stdout == ""
+
+- name: "Create mount point directory {{ disk_config.mount_point }}"
+  ansible.builtin.file:
+    path: "{{ disk_config.mount_point }}"
+    state: directory
+    owner: "{{ disk_config.owner }}"
+    group: "{{ disk_config.group }}"
+    mode: '0750'
+
+- name: "Get UUID of {{ disk_config.device }}1"
+  ansible.builtin.shell: |
+    blkid -s UUID -o value /dev/{{ disk_config.device }}1
+  register: disk_uuid
+  changed_when: false
+  check_mode: false
+
+- name: "Mount {{ disk_config.device }}1 to {{ disk_config.mount_point }}"
+  ansible.posix.mount:
+    path: "{{ disk_config.mount_point }}"
+    src: "UUID={{ disk_uuid.stdout }}"
+    fstype: "{{ disk_config.filesystem }}"
+    opts: "defaults,noatime,nodiratime"
+    state: mounted
+    dump: 0
+    passno: 2
+
+- name: "Set ownership of {{ disk_config.mount_point }}"
+  ansible.builtin.file:
+    path: "{{ disk_config.mount_point }}"
+    state: directory
+    owner: "{{ disk_config.owner }}"
+    group: "{{ disk_config.group }}"
+    mode: '0750'
+    recurse: yes
+
+- name: "Verify mount point {{ disk_config.mount_point }} is mounted"
+  ansible.builtin.shell: |
+    mount | grep -q "{{ disk_config.mount_point }}"
+  register: mount_check
+  changed_when: false
+  check_mode: false
+
+- name: "Display mount status for {{ disk_config.mount_point }}"
+  ansible.builtin.debug:
+    msg: "Successfully mounted /dev/{{ disk_config.device }}1 (UUID={{ disk_uuid.stdout }}) to {{ disk_config.mount_point }}"
+  when: mount_check.rc == 0

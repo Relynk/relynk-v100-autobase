@@ -1,0 +1,356 @@
+---
+# Storage setup tasks - included by prepare_storage.yml
+# Variables expected: disk_config (with device, expected_size, mount_point, filesystem, owner, group, description)
+
+- name: "Storage setup for {{ disk_config.device }} ({{ disk_config.description }})"
+  block:
+    - name: "Check if /dev/{{ disk_config.device }} exists"
+      ansible.builtin.stat:
+        path: "/dev/{{ disk_config.device }}"
+      register: device_stat
+
+    - name: "Fail if device /dev/{{ disk_config.device }} does not exist"
+      ansible.builtin.fail:
+        msg: "Device /dev/{{ disk_config.device }} does not exist on {{ inventory_hostname }}"
+      when: not device_stat.stat.exists
+
+    - name: "Check if device is a block device"
+      ansible.builtin.assert:
+        that:
+          - device_stat.stat.isblk is defined
+          - device_stat.stat.isblk
+        fail_msg: "/dev/{{ disk_config.device }} is not a block device"
+        success_msg: "/dev/{{ disk_config.device }} is a valid block device"
+
+    - name: "Get disk size in bytes for {{ disk_config.device }}"
+      ansible.builtin.shell: |
+        lsblk -b -n -o SIZE /dev/{{ disk_config.device }} | head -1
+      register: disk_size_bytes
+      changed_when: false
+      check_mode: false
+
+    - name: "Convert expected size to bytes"
+      ansible.builtin.shell: |
+        echo "{{ disk_config.expected_size }}" | numfmt --from=iec
+      register: expected_size_bytes
+      changed_when: false
+      check_mode: false
+
+    - name: "Calculate size tolerance"
+      ansible.builtin.set_fact:
+        size_tolerance: "{{ (expected_size_bytes.stdout | int * (size_tolerance_percent | default(5)) / 100) | int }}"
+        actual_size_gb: "{{ (disk_size_bytes.stdout | int / 1073741824) | round(2) }}"
+        expected_size_gb: "{{ (expected_size_bytes.stdout | int / 1073741824) | round(2) }}"
+
+    - name: "Display disk size comparison for {{ disk_config.device }}"
+      ansible.builtin.debug:
+        msg: 
+          - "Device: /dev/{{ disk_config.device }}"
+          - "Actual size: {{ actual_size_gb }} GB"
+          - "Expected size: {{ expected_size_gb }} GB"
+          - "Tolerance: ±{{ size_tolerance_percent | default(5) }}%"
+
+    - name: "Verify disk size within tolerance for {{ disk_config.device }}"
+      ansible.builtin.assert:
+        that:
+          - (disk_size_bytes.stdout | int - expected_size_bytes.stdout | int) | abs <= (size_tolerance | int)
+        fail_msg: "Disk size mismatch for /dev/{{ disk_config.device }}: found {{ actual_size_gb }}GB, expected {{ expected_size_gb }}GB (±{{ size_tolerance_percent }}%)"
+        success_msg: "Disk size verified for /dev/{{ disk_config.device }}"
+
+    - name: "Check current mount status for {{ disk_config.device }}"
+      ansible.builtin.shell: |
+        mount | grep "^/dev/{{ disk_config.device }}" || true
+      register: current_mount
+      changed_when: false
+      check_mode: false
+
+    - name: "Fail if {{ disk_config.device }} is already mounted"
+      ansible.builtin.fail:
+        msg: |
+          Device /dev/{{ disk_config.device }} is already mounted:
+          {{ current_mount.stdout }}
+          Please unmount it first or skip this device.
+      when: current_mount.stdout | length > 0
+
+    - name: "Check for existing partitions on {{ disk_config.device }}"
+      ansible.builtin.shell: |
+        if [[ "{{ disk_config.device }}" == nvme* ]]; then
+          lsblk -n -o NAME /dev/{{ disk_config.device }} | grep -c "{{ disk_config.device }}p[0-9]" || echo 0
+        else
+          lsblk -n -o NAME /dev/{{ disk_config.device }} | grep -c "{{ disk_config.device }}[0-9]" || echo 0
+        fi
+      register: partition_count
+      changed_when: false
+      check_mode: false
+
+    - name: "Backup partition table if exists on {{ disk_config.device }}"
+      ansible.builtin.shell: |
+        if [ {{ partition_count.stdout }} -gt 0 ]; then
+          sfdisk -d /dev/{{ disk_config.device }} > /tmp/{{ disk_config.device }}_partition_backup_{{ ansible_date_time.epoch }}.txt
+          echo "Partition table backed up to /tmp/{{ disk_config.device }}_partition_backup_{{ ansible_date_time.epoch }}.txt"
+        fi
+      when: partition_count.stdout | int > 0
+      changed_when: false
+
+    - name: "Determine partition naming scheme for {{ disk_config.device }}"
+      ansible.builtin.set_fact:
+        partition_name: "{% if 'nvme' in disk_config.device %}{{ disk_config.device }}p1{% else %}{{ disk_config.device }}1{% endif %}"
+
+    - name: "Check for existing filesystem on {{ disk_config.device }}"
+      ansible.builtin.shell: |
+        blkid /dev/{{ partition_name }} 2>/dev/null || echo "NO_FILESYSTEM"
+      register: existing_filesystem
+      changed_when: false
+      check_mode: false
+
+    - name: "Initialize disk and create partition on {{ disk_config.device }}"
+      block:
+        - name: "Wipe existing signatures on {{ disk_config.device }} (if needed)"
+          ansible.builtin.shell: |
+            wipefs -a /dev/{{ disk_config.device }} 2>/dev/null || true
+          when: existing_filesystem.stdout == "NO_FILESYSTEM"
+          changed_when: true
+
+        - name: "Create GPT partition table and partition on {{ disk_config.device }}"
+          ansible.builtin.shell: |
+            # Create GPT partition table
+            parted -s /dev/{{ disk_config.device }} mklabel gpt
+            # Create primary partition
+            parted -s /dev/{{ disk_config.device }} mkpart primary 1MiB 100%
+            # Set partition name
+            parted -s /dev/{{ disk_config.device }} name 1 {{ disk_config.mount_point | basename }}
+            # Verify alignment
+            parted -s /dev/{{ disk_config.device }} align-check optimal 1
+            # Force kernel to re-read partition table
+            partprobe /dev/{{ disk_config.device }}
+            sleep 2
+            # Verify partition exists
+            ls -la /dev/{{ partition_name }}
+          register: partition_creation
+          changed_when: true
+
+      when: existing_filesystem.stdout == "NO_FILESYSTEM" or partition_count.stdout | int == 0
+
+    - name: "Inform kernel of partition changes"
+      ansible.builtin.command: |
+        partprobe /dev/{{ disk_config.device }}
+      changed_when: true
+
+    - name: "Wait for partition device to be available"
+      ansible.builtin.wait_for:
+        path: "/dev/{{ partition_name }}"
+        state: present
+        timeout: 30
+        delay: 2
+
+    - name: "Verify partition is accessible"
+      ansible.builtin.stat:
+        path: "/dev/{{ partition_name }}"
+      register: partition_stat
+
+    - name: "Assert partition exists and is block device"
+      ansible.builtin.assert:
+        that:
+          - partition_stat.stat.exists
+          - partition_stat.stat.isblk
+        fail_msg: "Partition /dev/{{ partition_name }} was not created properly"
+        success_msg: "Partition /dev/{{ partition_name }} is ready"
+
+    - name: "Check if filesystem already exists on {{ partition_name }}"
+      ansible.builtin.shell: |
+        blkid -o value -s TYPE /dev/{{ partition_name }} 2>/dev/null || echo "NO_FS"
+      register: existing_fs_type
+      changed_when: false
+      check_mode: false
+
+    - name: "Create {{ disk_config.filesystem }} filesystem on {{ partition_name }}"
+      ansible.builtin.shell: |
+        # Check if filesystem already exists
+        if blkid /dev/{{ partition_name }} 2>/dev/null | grep -q TYPE; then
+          echo "Filesystem already exists on /dev/{{ partition_name }}"
+          blkid /dev/{{ partition_name }}
+          exit 0
+        else
+          echo "Creating new {{ disk_config.filesystem }} filesystem on /dev/{{ partition_name }}"
+          # Force create the filesystem
+          mkfs.{{ disk_config.filesystem }} -F -L {{ disk_config.mount_point | basename }} /dev/{{ partition_name }}
+          MKFS_EXIT=$?
+          # Wait a moment for the filesystem to be registered
+          sleep 3
+          # Probe for the new filesystem
+          partprobe /dev/{{ disk_config.device }} 2>/dev/null || true
+          # Try to get filesystem info
+          blkid /dev/{{ partition_name }} 2>/dev/null || echo "Filesystem created but blkid not ready yet"
+          exit $MKFS_EXIT
+        fi
+      register: fs_creation
+      changed_when: "'Creating new' in fs_creation.stdout"
+      failed_when: 
+        - fs_creation.rc != 0
+        - "'Filesystem created' not in fs_creation.stdout"
+
+    - name: "Debug filesystem creation result"
+      ansible.builtin.debug:
+        msg: 
+          - "Filesystem creation output:"
+          - "{{ fs_creation.stdout_lines }}"
+
+    - name: "Force kernel to recognize new filesystem"
+      ansible.builtin.shell: |
+        # Update udev
+        udevadm trigger /dev/{{ partition_name }}
+        udevadm settle
+        # Force blkid cache update
+        blkid -g
+        # Verify filesystem
+        file -s /dev/{{ partition_name }}
+      register: fs_verify
+      changed_when: false
+
+    - name: "Display filesystem verification"
+      ansible.builtin.debug:
+        msg: "Filesystem type: {{ fs_verify.stdout }}"
+
+    - name: "Wait for filesystem to be ready"
+      ansible.builtin.pause:
+        seconds: 2
+
+    - name: "Get UUID of {{ partition_name }}"
+      ansible.builtin.shell: |
+        # Force update blkid cache
+        blkid -g
+        # Try multiple times to get UUID as filesystem might need a moment to register
+        for i in 1 2 3 4 5; do
+          UUID=$(blkid -s UUID -o value /dev/{{ partition_name }} 2>/dev/null)
+          if [ -n "$UUID" ]; then
+            echo "$UUID"
+            exit 0
+          fi
+          # Force rescan
+          udevadm trigger /dev/{{ partition_name }}
+          udevadm settle
+          sleep 2
+        done
+        # If still no UUID, create one manually
+        echo "ERROR: Could not get UUID for /dev/{{ partition_name }}"
+        exit 1
+      register: disk_uuid
+      changed_when: false
+      check_mode: false
+
+    - name: "Verify UUID was retrieved for {{ partition_name }}"
+      ansible.builtin.assert:
+        that:
+          - disk_uuid.stdout | length > 0
+        fail_msg: "Failed to get UUID for /dev/{{ partition_name }}. Filesystem may not be created properly."
+        success_msg: "UUID retrieved: {{ disk_uuid.stdout }}"
+
+    - name: "Ensure mount point directory exists {{ disk_config.mount_point }}"
+      ansible.builtin.file:
+        path: "{{ disk_config.mount_point }}"
+        state: directory
+        owner: "{{ disk_config.owner }}"
+        group: "{{ disk_config.group }}"
+        mode: '0750'
+
+    - name: "Verify UUID exists in system"
+      ansible.builtin.shell: |
+        ls -la /dev/disk/by-uuid/ | grep "{{ disk_uuid.stdout }}" || echo "UUID not found in /dev/disk/by-uuid/"
+      register: uuid_check
+      changed_when: false
+
+    - name: "Display UUID verification"
+      ansible.builtin.debug:
+        msg: 
+          - "UUID: {{ disk_uuid.stdout }}"
+          - "UUID check: {{ uuid_check.stdout }}"
+
+    - name: "Test mount using device path"
+      ansible.builtin.shell: |
+        # Try to mount using device path
+        mount -t {{ disk_config.filesystem }} /dev/{{ partition_name }} {{ disk_config.mount_point }}
+        # If successful, unmount
+        umount {{ disk_config.mount_point }}
+        echo "Mount test successful"
+      register: mount_test
+      changed_when: false
+      failed_when: false
+
+    - name: "Handle mount configuration"
+      block:
+        - name: "Remove any existing fstab entry for {{ disk_config.mount_point }}"
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            regexp: "\\s+{{ disk_config.mount_point }}\\s+"
+            state: absent
+
+        - name: "Add fstab entry with UUID if available"
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            line: "UUID={{ disk_uuid.stdout }}  {{ disk_config.mount_point }}  {{ disk_config.filesystem }}  defaults,noatime,nodiratime  0  2"
+            state: present
+          when: 
+            - disk_uuid.stdout | length > 0
+            - not disk_uuid.stdout.startswith('ERROR')
+
+        - name: "Add fstab entry with device path as fallback"
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            line: "/dev/{{ partition_name }}  {{ disk_config.mount_point }}  {{ disk_config.filesystem }}  defaults,noatime,nodiratime  0  2"
+            state: present
+          when: 
+            - disk_uuid.stdout | length == 0 or disk_uuid.stdout.startswith('ERROR')
+
+        - name: "Mount filesystem"
+          ansible.builtin.shell: |
+            mount {{ disk_config.mount_point }}
+          register: final_mount
+          changed_when: true
+
+    - name: "Set final ownership and permissions on {{ disk_config.mount_point }}"
+      ansible.builtin.file:
+        path: "{{ disk_config.mount_point }}"
+        state: directory
+        owner: "{{ disk_config.owner }}"
+        group: "{{ disk_config.group }}"
+        mode: '0750'
+
+    - name: "Create .disk_info file in {{ disk_config.mount_point }}"
+      ansible.builtin.copy:
+        content: |
+          # Disk Information
+          Device: /dev/{{ disk_config.device }}
+          UUID: {{ disk_uuid.stdout }}
+          Mount Point: {{ disk_config.mount_point }}
+          Filesystem: {{ disk_config.filesystem }}
+          Size: {{ disk_config.expected_size }}
+          Purpose: {{ disk_config.description }}
+          Created: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+        dest: "{{ disk_config.mount_point }}/.disk_info"
+        owner: "{{ disk_config.owner }}"
+        group: "{{ disk_config.group }}"
+        mode: '0644'
+
+    - name: "Verify mount is successful for {{ disk_config.mount_point }}"
+      ansible.builtin.command: |
+        findmnt -n -o SOURCE,TARGET,FSTYPE,SIZE {{ disk_config.mount_point }}
+      register: mount_verify
+      changed_when: false
+      check_mode: false
+
+    - name: "Display mount verification for {{ disk_config.mount_point }}"
+      ansible.builtin.debug:
+        msg: 
+          - "✓ Successfully configured storage:"
+          - "  {{ mount_verify.stdout }}"
+
+  rescue:
+    - name: "Storage setup failed for {{ disk_config.device }}"
+      ansible.builtin.debug:
+        msg: 
+          - "ERROR: Failed to setup storage for {{ disk_config.device }}"
+          - "Device: /dev/{{ disk_config.device }}"
+          - "Target mount: {{ disk_config.mount_point }}"
+          - "Error: {{ ansible_failed_result.msg | default('Unknown error') }}"
+      failed_when: true
