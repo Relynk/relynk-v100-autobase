@@ -121,7 +121,7 @@ dcs_exists: false # or 'true' if you do not want Autobase to deploy and manage e
 # renovate: datasource=github-releases depName=etcd-io/etcd extractVersion=^v(?<version>.*)$
 etcd_version: 3.5.21
 etcd_conf_dir: "/etc/etcd"
-etcd_data_dir: "/mnt/etcd"
+etcd_data_dir: "/mnt/etcd/data"
 etcd_cluster_name: "etcd-{{ patroni_cluster_name }}" # ETCD_INITIAL_CLUSTER_TOKEN
 etcd_on_dedicated_nodes: "{{ groups['etcd_cluster'] | difference(groups['postgres_cluster']) | length > 0 }}" # 'true' or 'false'
 # TLS
@@ -233,9 +233,9 @@ postgresql_password_encryption_algorithm: "scram-sha-256" # or "md5" if your cli
 postgresql_cluster_name: "{{ 'main' if ansible_os_family == 'Debian' else 'data' }}"
 postgresql_home_dir: "{{ '/var/lib/postgresql' if ansible_os_family == 'Debian' else '/var/lib/pgsql' }}"
 # You can specify custom data dir path. Example: "/pgdata/{{ postgresql_version }}/main"
-postgresql_data_dir: "/mnt/pgdata"
+postgresql_data_dir: "/mnt/pgdata/data"
 # You can specify custom WAL dir path. Example: "/pgwal/{{ postgresql_version }}/pg_wal"
-postgresql_wal_dir: "/mnt/pgwal" # if defined, symlink will be created [optional]
+postgresql_wal_dir: "/mnt/pgwal/data" # if defined, symlink will be created [optional]
 postgresql_conf_dir: "\
   {% if ansible_os_family == 'Debian' %}\
   /etc/postgresql/{{ postgresql_version }}/{{ postgresql_cluster_name }}\
@@ -1199,7 +1199,7 @@ copy_files_to_all_server: []
 
 # (optional) Execute custom commands or scripts
 # This can be a direct command, a bash script content, or a path to a script on the host
-pre_deploy_command: "" # Command or script to be executed before the Postgres cluster deployment
+pre_deploy_command: "./scripts/pre-deploy.sh" # Command or script to be executed before the Postgres cluster deployment
 pre_deploy_command_timeout: 3600 # Timeout in seconds
 pre_deploy_command_hosts: "postgres_cluster" # host groups where the pre_deploy_command should be executed
 pre_deploy_command_print: true # Print the command in the ansible log
