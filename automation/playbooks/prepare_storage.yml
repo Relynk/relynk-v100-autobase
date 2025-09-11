@@ -9,12 +9,12 @@
   become_method: sudo
   gather_facts: true
   any_errors_fatal: true
-  
+
   vars:
     # Disk configuration for PostgreSQL cluster nodes
     disk_configurations:
       - device: nvme0n2
-        expected_size: "256G"
+        expected_size: "512G"
         mount_point: "/mnt/pgdata"
         filesystem: ext4
         owner: postgres
@@ -34,10 +34,10 @@
         owner: postgres
         group: postgres
         description: "etcd data directory"
-    
+
     # Validation settings
-    size_tolerance_percent: 5  # Allow 5% size tolerance
-    
+    size_tolerance_percent: 5 # Allow 5% size tolerance
+
   pre_tasks:
     - name: Display target hosts
       ansible.builtin.debug:
