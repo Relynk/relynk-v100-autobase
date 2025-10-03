@@ -349,7 +349,7 @@ postgresql_parameters:
   - { option: "hot_standby_feedback", value: "on" } # allows feedback from a hot standby to the primary that will avoid query conflicts
   - { option: "max_standby_streaming_delay", value: "30s" }
   - { option: "wal_receiver_status_interval", value: "10s" }
-  - { option: "shared_preload_libraries", value: "pg_stat_statements,auto_explain" } # pg_stat_kcache, pg_wait_sampling are recommended
+  - { option: "shared_preload_libraries", value: "pg_stat_statements,auto_explain,timescaledb,age" } # pg_stat_kcache, pg_wait_sampling are recommended
   - { option: "pg_stat_statements.max", value: "10000" }
   - { option: "pg_stat_statements.track", value: "all" }
   - { option: "pg_stat_statements.track_planning", value: "true" }
