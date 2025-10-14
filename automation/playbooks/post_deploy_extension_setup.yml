@@ -1,0 +1,129 @@
+---
+- name: vitabaks.autobase.post_deploy_extension_setup | PostgreSQL Extension Setup
+  hosts: postgres_cluster
+  become: true
+  become_method: sudo
+  gather_facts: true
+  any_errors_fatal: true
+  environment: "{{ proxy_env | default({}) }}"
+
+  vars:
+    pg_version: "{{ postgresql_version | default('17') }}"
+    toolkit_version: "{{ timescaledb_toolkit_version | default('latest') }}"
+    age_version: "{{ apache_age_version | default('master') }}"
+    age_git_url: "https://github.com/apache/age.git"
+    age_build_dir: "/tmp/age"
+
+  tasks:
+    - name: Print pg_version, toolkit_version, age_version variables
+      ansible.builtin.debug:
+        msg:
+          pg_version: "{{ pg_version }}"
+          toolkit_version: "{{ toolkit_version }}"
+          age_version: "{{ age_version }}"
+      run_once: true
+    # - name: Update apt cache
+    #   ansible.builtin.apt:
+    #     update_cache: true
+    #     cache_valid_time: 3600
+    #   register: apt_status
+    #   until: apt_status is success
+    #   delay: 5
+    #   retries: 3
+    #   when: ansible_os_family == "Debian"
+
+    # - name: Install TimescaleDB Toolkit
+    #   block:
+    #     - name: Install timescaledb-toolkit package
+    #       ansible.builtin.apt:
+    #         name: "timescaledb-toolkit-postgresql-{{ pg_version }}"
+    #         state: present
+    #       register: apt_status
+    #       until: apt_status is success
+    #       delay: 5
+    #       retries: 3
+    #       when: ansible_os_family == "Debian"
+
+    #   tags: timescaledb_toolkit
+
+    # - name: Install Apache AGE
+    #   block:
+    #     - name: Install build dependencies for Apache AGE
+    #       ansible.builtin.apt:
+    #         name:
+    #           - build-essential
+    #           - libreadline-dev
+    #           - zlib1g-dev
+    #           - flex
+    #           - bison
+    #           - postgresql-server-dev-{{ pg_version }}
+    #         state: present
+    #       register: apt_status
+    #       until: apt_status is success
+    #       delay: 5
+    #       retries: 3
+    #       when: ansible_os_family == "Debian"
+
+    #     - name: Check if Apache AGE is already installed
+    #       ansible.builtin.stat:
+    #         path: "{{ postgresql_bin_dir }}/../lib/age.so"
+    #       register: age_installed
+
+    #     - name: Clone Apache AGE repository
+    #       ansible.builtin.git:
+    #         repo: "{{ age_git_url }}"
+    #         dest: "{{ age_build_dir }}"
+    #         version: "{{ age_version }}"
+    #         force: true
+    #       when: not age_installed.stat.exists
+
+    #     - name: Build Apache AGE
+    #       ansible.builtin.command: make
+    #       args:
+    #         chdir: "{{ age_build_dir }}"
+    #       when: not age_installed.stat.exists
+    #       changed_when: true
+
+    #     - name: Install Apache AGE
+    #       ansible.builtin.command: make install
+    #       args:
+    #         chdir: "{{ age_build_dir }}"
+    #       when: not age_installed.stat.exists
+    #       changed_when: true
+
+    #     - name: Clean up Apache AGE build directory
+    #       ansible.builtin.file:
+    #         path: "{{ age_build_dir }}"
+    #         state: absent
+    #       when: not age_installed.stat.exists
+
+    #   tags: apache_age
+
+    # - name: Install pg_cron
+    #   block:
+    #     - name: Install pg_cron package
+    #       ansible.builtin.apt:
+    #         name: "postgresql-{{ pg_version }}-cron"
+    #         state: present
+    #       register: apt_status
+    #       until: apt_status is success
+    #       delay: 5
+    #       retries: 3
+    #       when: ansible_os_family == "Debian"
+
+    #   tags: pg_cron
+
+    # - name: Extension setup completed
+    #   ansible.builtin.debug:
+    #     msg:
+    #       - "PostgreSQL extension setup completed successfully"
+    #       - "Installed extensions:"
+    #       - "  - TimescaleDB Toolkit for PostgreSQL {{ pg_version }}"
+    #       - "  - Apache AGE (graph database)"
+    #       - "  - pg_cron (job scheduler)"
+    #       - ""
+    #       - "Note: These extensions are now available but need to be enabled in your databases using:"
+    #       - "  CREATE EXTENSION timescaledb_toolkit;"
+    #       - "  CREATE EXTENSION age;"
+    #       - "  CREATE EXTENSION pg_cron;"
+    #   run_once: true

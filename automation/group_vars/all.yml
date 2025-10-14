@@ -8,6 +8,8 @@ proxy_env: {} # yamllint disable rule:braces
 
 enable_timescaledb: true
 
+apache_age_version: "PG17/v1.6.0-rc0"
+
 ############################################################
 # Main cluster variables
 ############################################################

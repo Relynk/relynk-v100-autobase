@@ -31,8 +31,8 @@
         expected_size: "32G"
         mount_point: "/mnt/etcd"
         filesystem: ext4
-        owner: postgres
-        group: postgres
+        owner: etcd
+        group: etcd
         description: "etcd data directory"
 
     # Validation settings
@@ -110,6 +110,35 @@
         createhome: true
         state: present
       when: postgres_user_check.failed | default(false)
+      tags: user_setup
+
+    - name: Check if etcd user exists
+      ansible.builtin.getent:
+        database: passwd
+        key: etcd
+      register: etcd_user_check
+      ignore_errors: true
+      check_mode: false
+      tags: user_setup
+
+    - name: Create etcd group if it doesn't exist
+      ansible.builtin.group:
+        name: etcd
+        system: true
+        state: present
+      when: etcd_user_check.failed | default(false)
+      tags: user_setup
+
+    - name: Create etcd user if it doesn't exist
+      ansible.builtin.user:
+        name: etcd
+        system: true
+        shell: /bin/bash
+        home: /var/lib/etcd
+        group: etcd
+        createhome: true
+        state: present
+      when: etcd_user_check.failed | default(false)
       tags: user_setup
 
     - name: Process each disk configuration
