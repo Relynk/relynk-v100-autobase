@@ -629,6 +629,7 @@ wal_g_json: # config https://github.com/wal-g/wal-g#configuration
   - { option: "PGHOST", value: "{{ postgresql_unix_socket_dir }}" }
   - { option: "PGPORT", value: "{{ postgresql_port }}" }
   - { option: "PGUSER", value: "{{ patroni_superuser_username }}" }
+  - { option: "PGDATABASE", value: "{{ wal_g_pgdatabase | default((postgresql_databases | map(attribute='db') | list | first) | default('postgres', true)) }}" } # database wal-g connects to (set wal_g_pgdatabase to override)
 #  - { option: "AWS_S3_FORCE_PATH_STYLE", value: "true" }  # to use Minio.io S3-compatible storage
 #  - { option: "AWS_ENDPOINT", value: "http://minio:9000" }  # to use Minio.io S3-compatible storage
 #  - { option: "", value: "" }

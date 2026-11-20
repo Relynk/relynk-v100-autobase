@@ -18,6 +18,7 @@
       - { option: "PGHOST", value: "{{ postgresql_unix_socket_dir | default('/var/run/postgresql') }}" }
       - { option: "PGPORT", value: "{{ postgresql_port | default('5432') }}" }
       - { option: "PGUSER", value: "{{ patroni_superuser_username | default('postgres') }}" }
+      - { option: "PGDATABASE", value: "{{ wal_g_pgdatabase | default((postgresql_databases | default([]) | map(attribute='db') | list | first) | default('postgres', true)) }}" }
   delegate_to: localhost
   run_once: true # noqa run-once
   no_log: true # do not output contents to the ansible log
@@ -40,6 +41,7 @@
           - { option: "PGHOST", value: "{{ postgresql_unix_socket_dir | default('/var/run/postgresql') }}" }
           - { option: "PGPORT", value: "{{ postgresql_port | default('5432') }}" }
           - { option: "PGUSER", value: "{{ patroni_superuser_username | default('postgres') }}" }
+          - { option: "PGDATABASE", value: "{{ wal_g_pgdatabase | default((postgresql_databases | default([]) | map(attribute='db') | list | first) | default('postgres', true)) }}" }
       no_log: true # do not output contents to the ansible log
 
     # if 'gcs_key_file' is not defined, copy GCS key file from GCP_SERVICE_ACCOUNT_CONTENTS environment variable.
@@ -99,6 +101,7 @@
       - { option: "PGHOST", value: "{{ postgresql_unix_socket_dir | default('/var/run/postgresql') }}" }
       - { option: "PGPORT", value: "{{ postgresql_port | default('5432') }}" }
       - { option: "PGUSER", value: "{{ patroni_superuser_username | default('postgres') }}" }
+      - { option: "PGDATABASE", value: "{{ wal_g_pgdatabase | default((postgresql_databases | default([]) | map(attribute='db') | list | first) | default('postgres', true)) }}" }
   no_log: true # do not output contents to the ansible log
   when: cloud_provider | default('') | lower == 'azure'
 
@@ -126,6 +129,7 @@
       - { option: "PGHOST", value: "{{ postgresql_unix_socket_dir | default('/var/run/postgresql') }}" }
       - { option: "PGPORT", value: "{{ postgresql_port | default('5432') }}" }
       - { option: "PGUSER", value: "{{ patroni_superuser_username | default('postgres') }}" }
+      - { option: "PGDATABASE", value: "{{ wal_g_pgdatabase | default((postgresql_databases | default([]) | map(attribute='db') | list | first) | default('postgres', true)) }}" }
   no_log: true # do not output contents to the ansible log
   when: cloud_provider | default('') | lower == 'digitalocean'
 
@@ -155,6 +159,7 @@
       - { option: "PGHOST", value: "{{ postgresql_unix_socket_dir | default('/var/run/postgresql') }}" }
       - { option: "PGPORT", value: "{{ postgresql_port | default('5432') }}" }
       - { option: "PGUSER", value: "{{ patroni_superuser_username | default('postgres') }}" }
+      - { option: "PGDATABASE", value: "{{ wal_g_pgdatabase | default((postgresql_databases | default([]) | map(attribute='db') | list | first) | default('postgres', true)) }}" }
   delegate_to: localhost
   run_once: true # noqa run-once
   no_log: true # do not output contents to the ansible log
