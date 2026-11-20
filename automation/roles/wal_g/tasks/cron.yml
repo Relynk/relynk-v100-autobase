@@ -48,3 +48,12 @@
     job: "{{ item.job }}"
   loop: "{{ wal_g_cron_jobs }}"
   tags: wal_g_cron
+
+- name: Remove obsolete WAL-G cron jobs
+  ansible.builtin.cron:
+    cron_file: /etc/cron.d/walg
+    user: postgres
+    name: "{{ item }}"
+    state: absent
+  loop: "{{ wal_g_obsolete_cron_jobs | default([]) }}"
+  tags: wal_g_cron

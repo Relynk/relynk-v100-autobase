@@ -256,8 +256,19 @@
     dest: "{{ postgresql_home_dir }}/.walg.json"
     owner: postgres
     group: postgres
-    mode: "0644"
+    mode: "0600" # contains storage and database credentials
+  no_log: true
   tags: wal-g, wal_g, wal_g_conf
+
+- name: "Deploy WAL-G backup script {{ wal_g_backup_script_path }}"
+  ansible.builtin.template:
+    src: templates/walg-backup.sh.j2
+    dest: "{{ wal_g_backup_script_path }}"
+    owner: root # postgres can run the script but not modify it
+    group: postgres
+    mode: "0750" # may embed the Healthchecks URL, so not world-readable
+  no_log: true
+  tags: wal-g, wal_g, wal_g_cron
 
 - ansible.builtin.import_tasks: cron.yml
   when:

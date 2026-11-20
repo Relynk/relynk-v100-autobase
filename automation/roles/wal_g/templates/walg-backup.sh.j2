@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Managed by Ansible (roles/wal_g). Usage: walg-backup.sh full|delta
+# Runs on every cluster node from cron; only the Patroni primary does any work.
+set -uo pipefail
+
+mode="${1:-}"
+case "$mode" in
+	full) push_flags="--full" ;;
+	delta) push_flags="" ;;
+	*) echo "usage: $0 full|delta" >&2; exit 2 ;;
+esac
+
+healthchecks_url="{{ wal_g_healthchecks_url | default('') }}"
+backup_log="{{ postgresql_log_dir }}/walg_backup.log"
+delete_log="{{ postgresql_log_dir }}/walg_delete.log"
+
+ping_hc() {
+	[ -n "$healthchecks_url" ] || return 0
+	curl -fsS -m 10 --retry 3 -o /dev/null "${healthchecks_url}${1:-}" || true
+}
+
+if ! curl -sf -o /dev/null "http://{{ wal_g_patroni_check_address }}:{{ patroni_restapi_port }}/primary"; then
+	exit 0
+fi
+
+ping_hc /start
+
+if ! {{ wal_g_path }} backup-push {{ postgresql_data_dir }} $push_flags > "$backup_log" 2>&1; then
+	ping_hc /fail
+	exit 1
+fi
+
+if ! {{ wal_g_path }} delete retain FULL {{ wal_g_retain_full_backups }} --confirm > "$delete_log" 2>&1 \
+	|| ! {{ wal_g_path }} delete garbage --confirm >> "$delete_log" 2>&1; then
+	ping_hc /fail
+	exit 1
+fi
+
+ping_hc
