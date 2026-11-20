@@ -650,23 +650,39 @@ wal_g_prefetch_dir_path: "{{ postgresql_home_dir }}/wal-g-prefetch"
 
 # Define job_parts outside of wal_g_cron_jobs
 # ⚠️ Ensure there is a space at the beginning of each part to prevent commands from concatenating.
-wal_g_backup_command:
-  - "curl -I -s http://{{ bind_address }}:{{ patroni_restapi_port }} | grep 200"
+wal_g_retain_full_backups: 4 # number of weekly full backups to keep (deltas of kept fulls are kept too)
+wal_g_primary_check_command: "curl -sf -o /dev/null http://localhost:{{ patroni_restapi_port }}/primary"
+# Saturday: full backup. Other days: delta against the previous backup (WALG_DELTA_MAX_STEPS in wal_g_json must be >= 6).
+wal_g_full_backup_command:
+  - "{{ wal_g_primary_check_command }}"
+  - " && {{ wal_g_path }} backup-push {{ postgresql_data_dir }} --full > {{ postgresql_log_dir }}/walg_backup.log 2>&1"
+wal_g_delta_backup_command:
+  - "{{ wal_g_primary_check_command }}"
   - " && {{ wal_g_path }} backup-push {{ postgresql_data_dir }} > {{ postgresql_log_dir }}/walg_backup.log 2>&1"
 wal_g_delete_command:
-  - "curl -I -s http://{{ bind_address }}:{{ patroni_restapi_port }} | grep 200"
-  - " && {{ wal_g_path }} delete retain FULL 4 --confirm > {{ postgresql_log_dir }}/walg_delete.log 2>&1"
+  - "{{ wal_g_primary_check_command }}"
+  - " && {{ wal_g_path }} delete retain FULL {{ wal_g_retain_full_backups }} --confirm > {{ postgresql_log_dir }}/walg_delete.log 2>&1"
+  - " && {{ wal_g_path }} delete garbage --confirm >> {{ postgresql_log_dir }}/walg_delete.log 2>&1"
 
 wal_g_cron_jobs:
-  - name: "WAL-G: Create daily backup"
+  - name: "WAL-G: Create weekly full backup"
     user: "postgres"
     file: /etc/cron.d/walg
     minute: "00"
     hour: "{{ WALG_BACKUP_HOUR | default('3') }}"
     day: "*"
     month: "*"
-    weekday: "*"
-    job: "{{ wal_g_backup_command | join('') }}"
+    weekday: "6"
+    job: "{{ wal_g_full_backup_command | join('') }}"
+  - name: "WAL-G: Create daily delta backup"
+    user: "postgres"
+    file: /etc/cron.d/walg
+    minute: "00"
+    hour: "{{ WALG_BACKUP_HOUR | default('3') }}"
+    day: "*"
+    month: "*"
+    weekday: "0-5"
+    job: "{{ wal_g_delta_backup_command | join('') }}"
   - name: "WAL-G: Delete old backups"
     user: "postgres"
     file: /etc/cron.d/walg
